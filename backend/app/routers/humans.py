@@ -462,7 +462,7 @@ def process_training_data(human_id: str, mode: str = "replace", source: str = "m
             asr_out.mkdir(exist_ok=True)
             subprocess.run(
                 [GS_PYTHON, str(asr_script), "-i", str(asr_in), "-o", str(asr_out), "-l", "zh"],
-                capture_output=True, timeout=10800,
+                capture_output=True, timeout=10800, cwd=str(GPT_SOVITS_ROOT),
             )
             # funasr_asr.py 的输出文件名取自输入目录名（此处为 _asr_in.list），
             # 不能写死成 sliced.list，否则读不到结果、全部切片标注为空。
