@@ -2,7 +2,7 @@
 data/
 
 # 下载出来的 ASR 模型权重（funasr 用相对路径 tools/asr/models，曾在本目录落出 1.2GB）
-backend/tools/
+backend/tools
 *.pt
 
 # Python

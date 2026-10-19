@@ -1,5 +1,6 @@
 import re
 import sys
+from pathlib import Path
 sys.path.insert(0, ".")
 from app.text_utils import chunk_text, split_sentences
 
@@ -41,7 +42,8 @@ def check(name, text, max_chars=300):
 
 
 print("=== 用户的《夜闯聚贤楼》")
-TEXT = open("REDACTED_TMP/test_script.txt", encoding="utf-8").read().strip()
+# 文稿随测试入库，避免依赖临时目录（也免得把本机用户名写进仓库）
+TEXT = (Path(__file__).parent / "fixtures" / "test_script.txt").read_text(encoding="utf-8").strip()
 cs = check("评书", TEXT)
 for i, c in enumerate(cs, 1):
     print("   #%2d(%2d字) %s" % (i, len(c), c))
