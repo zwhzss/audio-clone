@@ -124,6 +124,7 @@ class ProcessBody(BaseModel):
     granularity: str = "para"   # align 时：para=按段（若干完整句）| sentence=按句
     max_chars: int = 300        # align 段模式：一段最多多少字
     max_sec: float = 30.0       # align 段模式：一段最长多少秒
+    hotwords: str | None = None  # align 时的热词（空格/逗号分隔的专名表）
 
 
 @router.post("/{task_id}/process")
@@ -156,6 +157,8 @@ def process(task_id: str, body: ProcessBody, db: Session = Depends(get_db)):
     if not -60 <= params["noise_db"] <= -15:
         raise HTTPException(400, "noise_db 应在 -60~-15 dB 之间")
     t.params = params
+    if body.hotwords is not None:
+        t.hotwords = (body.hotwords or "").strip()[:2000]
     t.status = "slicing"
     t.error = ""
     db.commit()
@@ -178,18 +181,22 @@ def process(task_id: str, body: ProcessBody, db: Session = Depends(get_db)):
                 sdir.mkdir(parents=True, exist_ok=True)
             if params.get("mode") == "align":
                 total = media_duration(src)
+                hw = (t2.hotwords or "").strip()
                 update(4, "整条音频识别（带时间戳）…")
                 cache = d / "sentences.json"
-                units = None
+                units, info = None, {}
                 if cache.exists():
                     try:
-                        units = json.loads(cache.read_text(encoding="utf-8")).get("units") or None
+                        info = json.loads(cache.read_text(encoding="utf-8"))
                     except Exception:  # 缓存坏了就重识别
-                        units = None
-                    if units:
+                        info = {}
+                    # 热词变了必须重识别，否则会沿用没有偏置的旧文本
+                    if info.get("units") and (info.get("hotwords") or "").strip() == hw:
+                        units = info["units"]
                         update(30, "复用上次识别结果（%d 个标点单元）…" % len(units))
                 if not units:
-                    units = align_units(src, cache)
+                    units = align_units(src, cache, hw)
+                    info = json.loads(cache.read_text(encoding="utf-8"))
                 update(55, "按句子边界归片…")
                 groups = group_units(units, params.get("granularity") or "para",
                                      int(params.get("max_chars") or 300),
@@ -209,6 +216,11 @@ def process(task_id: str, body: ProcessBody, db: Session = Depends(get_db)):
                 note = "识别对齐：%d 个标点单元 → %d 片，覆盖 %.1f%%" % (
                     len(units), len(pieces), 100 * sum(p.duration for p in pieces) / total
                     if total else 0.0)
+                model = str(info.get("model") or "")
+                if hw:
+                    note += "；热词 %d 个（%s）" % (len(hw.split()), "SeACo" if "seaco" in model else "模型不支持热词")
+                    if "seaco" not in model:
+                        note += "！实际用的是 %s，它不吃热词，热词没生效 —— 需下载 SeACo-Paraformer" % (model or "默认模型")
                 if flagged:
                     note += "；%d 片边界可疑（引号未闭合或无句末标点），请优先试听" % flagged
                 t2.note = note
@@ -309,6 +321,7 @@ def task_detail(task_id: str, db: Session = Depends(get_db)):
 class TaskUpdate(BaseModel):
     title: str | None = None
     lang: str | None = None
+    hotwords: str | None = None
 
 
 @router.patch("/{task_id}")
@@ -320,6 +333,8 @@ def update_task(task_id: str, body: TaskUpdate, db: Session = Depends(get_db)):
         t.title = _clean(body.title, t.title)
     if body.lang:
         t.lang = body.lang.strip()[:10]
+    if body.hotwords is not None:
+        t.hotwords = (body.hotwords or "").strip()[:2000]
     db.commit()
     return t.to_dict()
 

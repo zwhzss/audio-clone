@@ -23,7 +23,7 @@ const splitAt = reactive({})    // slice_id -> 拆分秒数输入
 
 const params = reactive({
   noise_db: -35, min_silence: 0.5, min_piece: 1.0, max_piece: 10.0, merge_gap: 3.0,
-  mode: 'align', granularity: 'para', max_chars: 300, max_sec: 30,
+  mode: 'align', granularity: 'para', max_chars: 300, max_sec: 30, hotwords: '',
 })
 
 // 三档预设：数值来自 180 秒真实评书音频的参数扫描（覆盖率均为 100%）
@@ -104,6 +104,13 @@ async function start(redo = false) {
 
 async function openTask(t) {
   cur.value = await api.sliceTask(t.id)
+  // 把任务当时用的参数回填到界面，避免「重跑当前任务」时悄悄换了口径
+  const p = cur.value.params || {}
+  for (const k of ['noise_db', 'min_silence', 'min_piece', 'max_piece', 'merge_gap',
+                   'mode', 'granularity', 'max_chars', 'max_sec']) {
+    if (p[k] !== undefined && p[k] !== null) params[k] = p[k]
+  }
+  params.hotwords = cur.value.hotwords || ''
   page.value = 1
   await loadSlices()
 }
@@ -265,6 +272,17 @@ const fmt = (n) => (n || 0).toFixed(2)
           <input type="range" min="5" max="90" step="5" v-model.number="params.max_sec" />
         </label>
       </template>
+    </div>
+    <div v-if="params.mode === 'align'" style="margin-top:8px;">
+      <label style="font-size:12px;">热词（可选，空格或逗号分隔）—— 专名老被同音写错时就填这里
+        <textarea v-model="params.hotwords" rows="2" style="width:100%; box-sizing:border-box; font-size:12px;"
+                  placeholder="例如：姚氏 岳和 岳飞 王员外 黑风岭 汤阴县 片瓦无存"></textarea>
+      </label>
+      <div class="muted" style="font-size:11px; margin-top:2px;">
+        填了会改用支持热词偏置的 SeACo-Paraformer 重新识别（改了热词不能用旧缓存）。
+        实测在评书素材上：「岳河→岳和」「片着瓦无存→片瓦无存」被纠正，但同一次里「王员外」被带成了
+        「王外外」—— 热词会偏置整个解码，改完请抽查专名附近那几片。
+      </div>
     </div>
     <div class="muted" style="font-size:11px; margin-top:4px;">
       识别对齐会先把整条音频识别一次（拿到标点级时间戳），刀口只落在「引号已闭合的句末」，

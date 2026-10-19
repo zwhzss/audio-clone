@@ -49,6 +49,7 @@ class SliceTask(Base):
     slice_count = Column(Integer, default=0)
     labeled_count = Column(Integer, default=0)
     total_sec = Column(Float, default=0.0)
+    hotwords = Column(Text, default="")              # 识别对齐模式的热词（空格分隔）
     note = Column(Text, default="")                # ASR 降级等提示
     created_at = Column(DateTime, default=_now)
     finished_at = Column(DateTime, nullable=True)
@@ -231,11 +232,12 @@ def silence_ranges(src: Path, noise_db: float, min_silence: float) -> list[tuple
     return _silence_ranges(ffmpeg_exe(), src, noise_db, min_silence)
 
 
-def align_units(src: Path, out_json: Path) -> list[dict]:
+def align_units(src: Path, out_json: Path, hotwords: str = "") -> list[dict]:
     """整条音频识别一次，返回标点级单元 [{text,start,end,chars}]（单位秒）。
 
     识别器自带的时间戳让我们可以只在标点后面下刀，从根上避免「一个词被劈成两片」。
-    结果缓存到 out_json，改粒度时不必重新识别。
+    结果缓存到 out_json，改粒度时不必重新识别；缓存里记着当时用的热词，热词变了会自动重识别。
+    hotwords 非空时脚本会改用 SeACo-Paraformer —— 这个 funasr 版本里只有它在推理阶段读热词。
     """
     import os
 
@@ -249,8 +251,10 @@ def align_units(src: Path, out_json: Path) -> list[dict]:
     libbin = Path(str(GS_PYTHON)).parent.parent / "Library" / "bin"
     if libbin.is_dir():
         env["PATH"] = str(libbin) + ";" + env.get("PATH", "")
-    r = subprocess.run([str(GS_PYTHON), str(script), "--in", str(src), "--out", str(out_json)],
-                       capture_output=True, timeout=10800, cwd=str(GPT_SOVITS_ROOT), env=env)
+    cmd = [str(GS_PYTHON), str(script), "--in", str(src), "--out", str(out_json)]
+    if (hotwords or "").strip():
+        cmd += ["--hotword", hotwords.strip()[:2000]]
+    r = subprocess.run(cmd, capture_output=True, timeout=10800, cwd=str(GPT_SOVITS_ROOT), env=env)
     if not Path(out_json).exists():
         raise RuntimeError("整条识别失败：%s" % (r.stderr or b"").decode("utf-8", "replace")[-300:])
     units = json.loads(Path(out_json).read_text(encoding="utf-8")).get("units") or []

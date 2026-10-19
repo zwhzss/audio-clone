@@ -117,6 +117,7 @@ def _migrate():
         "digital_humans": ["s1_data_dir", "s2_data_dir"],
         "training_slices": ["slice_task_id"],
         "audio_slices": ["flags"],
+        "slice_tasks": ["hotwords"],
     }
     with engine.begin() as conn:
         for table, cols in adds.items():
@@ -136,5 +137,6 @@ def _migrate():
                         "s2_data_dir": "VARCHAR(500) DEFAULT ''",
                         "slice_task_id": "VARCHAR(16) DEFAULT ''",
                         "flags": "VARCHAR(60) DEFAULT ''",
+                        "hotwords": "TEXT DEFAULT ''",
                     }[col]
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))
