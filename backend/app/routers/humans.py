@@ -17,6 +17,7 @@ from ..db import get_db
 from ..digital_human import DigitalHuman, INFERENCE_PRESETS, TRAINING_PRESETS_8GB, analyze_training_data
 from ..training_record import TrainingRecord, scan_data_hashes, check_duplicates
 from ..models import Voice, AIModel, get_active_model
+from ..slicing import asr_label_batch, slice_by_silence
 
 router = APIRouter(prefix="/api/humans", tags=["humans"])
 
@@ -351,142 +352,55 @@ def process_training_data(human_id: str, mode: str = "replace", source: str = "m
             old.unlink(missing_ok=True)
         shutil.rmtree(d / "sliced", ignore_errors=True)
 
-    import subprocess, imageio_ffmpeg, re
-    exe = imageio_ffmpeg.get_ffmpeg_exe()
-
     sliced_dir = d / "sliced"
     if mode == "append":
         # 追加模式：保留旧切片（旧切片的 ASR 标注源不能丢），只 mkdir
         sliced_dir.mkdir(parents=True, exist_ok=True)
-        prev_sliced = {f.name for f in sliced_dir.glob("*.wav")}
     else:
         # replace 重建，sliced/ 只保留本次新切片
         shutil.rmtree(sliced_dir, ignore_errors=True)
         sliced_dir.mkdir(exist_ok=True)
-        prev_sliced = set()
 
     from ..training_slice import TrainingSlice
 
-    # 切片编号：replace 从 1 开始；append 接续已有最大序号（避免文件名/排序冲突）
+    # 切片编号：replace 从 1 开始；append 接续**文件名里已有的最大号**。
+    # 不能用 sort_order 推：文件名是 1 起始、sort_order 是 0 起始，直接用后者会让追加的
+    # 第一段与已有最后一段同号（旧数据里 006_raw_x_seg6 与 006_20260816_seg1 就是这么来的）。
     index = 1
     if mode == "append":
-        orders = db.execute(
-            select(TrainingSlice.sort_order).where(
-                TrainingSlice.human_id == human_id,
-                TrainingSlice.is_deleted == 0,
-                TrainingSlice.data_dir == _nd(d),
-            )
-        ).scalars().all()
-        if orders:
-            index = max(orders) + 1
+        nums = []
+        for p in list(d.glob("*_seg*.wav")) + list(sliced_dir.glob("*.wav")):
+            head = p.name.split("_", 1)[0]
+            if head.isdigit():
+                nums.append(int(head))
+        index = (max(nums) + 1) if nums else 1
+    # 切片算法与「音频分片」模块同源（app/slicing.py），不在这里再写一遍。
+    # 旧实现有个致命缺陷：两刀之间不足 1.5 秒时它照样推进游标，等于把那段语音直接丢掉；
+    # 数值口径保持与过去一致（不强制细分长段），只把「丢」改成「并」。
+    slice_params = {"noise_db": -35.0, "min_silence": 0.5, "min_piece": 1.0,
+                    "max_piece": 0.0, "merge_gap": 1.5}
+    new_pieces = []
+    failed = []
     for raw in raw_files:
-        # 静音检测：找出所有静音段
-        r = subprocess.run(
-            [exe, "-i", str(raw), "-af", "silencedetect=n=-35dB:d=0.5", "-f", "null", "-"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=600,
-        )
-        # 解析静音起止
-        silence = []  # [(start, end), ...]
-        cur_start = None
-        for line in r.stderr.splitlines():
-            m = re.search(r"silence_start: ([\d.]+)", line)
-            if m:
-                cur_start = float(m.group(1))
-            m = re.search(r"silence_end: ([\d.]+)", line)
-            if m and cur_start is not None:
-                silence.append((cur_start, float(m.group(1))))
-                cur_start = None
+        try:
+            pieces = slice_by_silence(raw, d, slice_params, start_index=index)
+        except Exception as e:  # 一份文件读不动不该拖垮整批
+            failed.append("%s（%s）" % (raw.name, str(e)[:50]))
+            continue
+        for p in pieces:
+            shutil.copy2(p.path, sliced_dir / p.name)
+        new_pieces.extend(pieces)
+        index += len(pieces)
 
-        # 计算总时长
-        dur_r = subprocess.run(
-            [exe, "-i", str(raw), "-f", "null", "-"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
-        )
-        total_dur = 0.0
-        for line in dur_r.stderr.splitlines():
-            m = re.search(r"Duration: (\d+):(\d+):([\d.]+)", line)
-            if m:
-                total_dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
-                break
-
-        # 切分点：静音段中点，保留语音区间（≥1.5s）
-        cuts = []
-        prev_end = 0.0
-        for s, e in silence:
-            mid = (s + e) / 2
-            if mid - prev_end >= 1.5:
-                cuts.append((prev_end, mid))
-            prev_end = mid
-        if total_dur - prev_end >= 1.5:
-            cuts.append((prev_end, total_dur))
-
-        # 无静音或整段超长：整段处理
-        if not cuts or (len(cuts) == 1 and cuts[0][1] - cuts[0][0] > 600):
-            cuts = [(0, total_dur)]
-
-        # 逐段切片
-        for si, (start, end) in enumerate(cuts):
-            if end - start < 1.0:
-                continue
-            name = f"{index:03d}_{raw.stem}_seg{si + 1}.wav"
-            dst = d / name
-            subprocess.run(
-                [exe, "-y", "-ss", f"{start:.2f}", "-to", f"{end:.2f}", "-i", str(raw),
-                 "-ar", "32000", "-ac", "1", "-c:a", "pcm_s16le", str(dst)],
-                capture_output=True, timeout=300,
-            )
-            if dst.exists() and dst.stat().st_size > 2000:
-                shutil.copy2(dst, sliced_dir / name)
-                index += 1
-            else:
-                dst.unlink(missing_ok=True)
-
-    # ---- ASR 自动标注（复用 GPT-SoVITS 官方 funasr_asr.py；失败降级为人工标注）----
-    # 输入改为「根目录全部切片」（复制到 _asr_in/）：sliced/ 会被后续 append 重建
-    # 清空导致孤儿切片（如 001-006）永远失去 ASR 标注机会，根目录统一处理可覆盖全部。
-    asr_texts = {}
-    asr_note = ""
-    try:
-        from ..gpt_sovits_train import GPT_SOVITS_ROOT, PYTHON as GS_PYTHON
-        asr_script = GPT_SOVITS_ROOT / "tools" / "asr" / "funasr_asr.py"
-        if Path(GS_PYTHON).exists() and asr_script.exists():
-            asr_in = d / "_asr_in"
-            shutil.rmtree(asr_in, ignore_errors=True)
-            asr_in.mkdir(exist_ok=True)
-            segs = sorted(d.glob("*_seg*.wav"))
-            for w in segs:
-                shutil.copy2(w, asr_in / w.name)
-            if not list(asr_in.glob("*.wav")):
-                raise RuntimeError("无切片可标注")
-            asr_out = d / "_asr_out"
-            asr_out.mkdir(exist_ok=True)
-            subprocess.run(
-                [GS_PYTHON, str(asr_script), "-i", str(asr_in), "-o", str(asr_out), "-l", "zh"],
-                capture_output=True, timeout=10800, cwd=str(GPT_SOVITS_ROOT),
-            )
-            # funasr_asr.py 的输出文件名取自输入目录名（此处为 _asr_in.list），
-            # 不能写死成 sliced.list，否则读不到结果、全部切片标注为空。
-            list_files = sorted(asr_out.glob("*.list"), key=lambda p: p.stat().st_mtime, reverse=True)
-            for line in list_files[0].read_text(encoding="utf-8").splitlines() if list_files else []:
-                parts = line.split("|")
-                if len(parts) >= 4 and parts[0]:
-                    # 文本本身可能含 '|'，须把第 4 段之后全部收回
-                    text = "|".join(parts[3:]).strip()
-                    if text:
-                        asr_texts[Path(parts[0]).name] = text
-        else:
-            asr_note = "（未找到 funasr_asr.py / GPT-SoVITS Python 环境，跳过 ASR）"
-    except Exception as e:  # noqa: BLE001
-        asr_note = f"（ASR 自动标注失败：{e}）"
+    # ---- ASR 自动标注：走分片模块同一条路径（官方 funasr_asr.py，缺失时自动降级）----
+    # 只标本次新切的片段：append 模式下旧切片的文本已在数据库里，不必重识别。
+    asr_texts, asr_note = asr_label_batch([p.path for p in new_pieces], d / "_asr", "zh")
 
     # 生成 train.list（训练用）+ 写入数据库（主数据源）
     from ..digital_human import _classify_text
 
-    # 本次切片集合：append 只写本次新增切片（旧切片保留在 sliced/ 但已有记录，不重复写）
-    if mode == "append":
-        wavs = [w for w in sorted(sliced_dir.glob("*.wav")) if w.name not in prev_sliced]
-    else:
-        wavs = sorted(d.glob("*_seg*.wav"))
+    # 本次切片集合：直接用切完的 Piece 列表（append 只含新增，replace 已先清空根目录）
+    wavs = [p.path for p in new_pieces]
     if mode == "replace":
         # 清理当前 data_dir 的旧切片数据（保留其他目录的记录）
         db.query(TrainingSlice).filter(
@@ -532,11 +446,17 @@ def process_training_data(human_id: str, mode: str = "replace", source: str = "m
     else:
         msg = f"切片完成，共 {len(wavs)} 个片段，ASR 未识别到文字，请人工校对"
 
+    if not wavs:
+        msg = "没切出任何片段：" + ("、".join(failed) if failed else "音频可能没有可识别的人声")
+    elif failed:
+        msg += "；跳过读不动的文件：" + "、".join(failed)
+
     return {
         "sliced_files": len(wavs),
         "list_file": "train.list",
         "asr_labeled": labeled,
         "mode": mode,
+        "failed": failed,
         "message": msg,
     }
 
