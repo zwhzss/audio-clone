@@ -319,7 +319,7 @@ async def upload_training_audio(human_id: str, file: UploadFile, mode: str = For
 @router.post("/{human_id}/data-process")
 def process_training_data(human_id: str, mode: str = "replace", source: str = "main",
                           slice_mode: str = "align", granularity: str = "para",
-                          max_chars: int = 300, max_sec: float = 30.0, hotwords: str = "",
+                          max_chars: int = 0, max_sec: float = 0, hotwords: str = "",
                           db: Session = Depends(get_db)):
     """自动处理：逐个音频切片 → ASR 标注 → 生成可校对列表。
 
@@ -386,8 +386,8 @@ def process_training_data(human_id: str, mode: str = "replace", source: str = "m
                     "max_piece": 0.0, "merge_gap": 1.5,
                     "mode": slice_mode if slice_mode in ("silence", "align") else "silence",
                     "granularity": granularity if granularity in ("para", "sentence") else "para",
-                    "max_chars": max(30, min(2000, int(max_chars))),
-                    "max_sec": max(3.0, min(120.0, float(max_sec))),
+                    "max_chars": max(30, min(2000, int(max_chars))) if max_chars else 0,
+                    "max_sec": max(3.0, min(120.0, float(max_sec))) if max_sec else 0,
                     "hotwords": (hotwords or "").strip()[:2000]}
     align_cache = d / "_align"
     new_pieces = []

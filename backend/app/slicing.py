@@ -31,6 +31,14 @@ DEFAULTS = {
     "merge_gap": 3.0,      # 两刀之间不足这么多秒就并成一段（并，不是丢）
     "lang": "zh",
 }
+# 识别对齐模式的推荐缺省值：s1 语感吃「段」（完整句群，别超 20 秒），
+# s2 音色吃「句」（贴近官方切片器 4~10 秒的量级，太长会让注意力显存按 T^2 涨）。
+ALIGN_DEFAULTS = {
+    "para": {"max_chars": 300, "max_sec": 20.0},
+    "sentence": {"max_chars": 120, "max_sec": 10.0},
+}
+# s2 训练只收 0.6~54 秒的样本，越线是被 data_utils.py 静默丢弃（不报错），所以留足余量
+HARD_MAX_SEC = 45.0
 
 
 class SliceTask(Base):
@@ -288,7 +296,8 @@ def _is_final(text: str) -> bool:
 
 
 def group_units(units: list[dict], granularity: str = "para", max_chars: int = 300,
-                max_sec: float = 30.0, min_piece: float = 1.0) -> list[Group]:
+                max_sec: float = 20.0, min_piece: float = 1.0,
+                hard_max_sec: float = HARD_MAX_SEC) -> list[Group]:
     """把标点级识别单元聚成片段，只在「引号已闭合 + 句末标点」处断。
 
     granularity=para：累计接近字数/时长上限才断（一段含若干完整句子）。
@@ -310,11 +319,13 @@ def group_units(units: list[dict], granularity: str = "para", max_chars: int = 3
         nxt = len(buf) + len(units[i + 1].get("text") or "") if i + 1 < n else 0
         depth0 = _open_depth(buf) == 0
         final = _is_final(u.get("text") or "")
-        # 到上限后先继续找句末，宽限到 1.3 倍；实在等不到才在逗号处断（引号已闭合就不会劈词）
-        over_hard = len(buf) >= max_chars * 1.3 or end - buf_start >= max_sec * 1.3
+        # 到上限后先继续找句末，宽限到 1.3 倍；但绝不越过 hard_max_sec ——
+        # s2 训练对 >=54 秒的样本是静默丢弃，宁可这里在逗号处断一刀并标 cap_comma。
+        ceiling = min(max_sec * 1.3, hard_max_sec)
+        over_hard = len(buf) >= max_chars * 1.3 or end - buf_start >= ceiling
         can_break = depth0 and (final or over_hard)
         at_limit = (i == n - 1 or granularity == "sentence" or nxt > max_chars
-                    or end - buf_start >= max_sec)
+                    or end - buf_start >= max_sec or end - buf_start >= ceiling)
         if can_break and at_limit:
             groups.append(Group(buf.strip(), round(buf_start, 3), round(end, 3),
                                 "" if final else "cap_comma"))
@@ -421,8 +432,10 @@ def run_slice_pipeline(src: Path, out_dir: Path, params: dict, start_index: int 
     if not units:
         units = align_units(src, cache, hw)
         info = json.loads(cache.read_text(encoding="utf-8"))
-    groups = group_units(units, params.get("granularity") or "para",
-                         int(params.get("max_chars") or 300), float(params.get("max_sec") or 30.0),
+    gran = params.get("granularity") or "para"
+    dv = ALIGN_DEFAULTS.get(gran, ALIGN_DEFAULTS["para"])
+    groups = group_units(units, gran, int(params.get("max_chars") or dv["max_chars"]),
+                         float(params.get("max_sec") or dv["max_sec"]),
                          float(params.get("min_piece") or 1.0))
     groups = snap_cuts(groups, silence_ranges(src, float(params.get("noise_db", DEFAULTS["noise_db"])),
                                               float(params.get("min_silence", DEFAULTS["min_silence"]))),
@@ -433,6 +446,12 @@ def run_slice_pipeline(src: Path, out_dir: Path, params: dict, start_index: int 
     flagged = sum(1 for p in pieces if p.flags)
     note = "识别对齐：%d 个标点单元 → %d 片，覆盖 %.1f%%" % (
         len(units), len(pieces), 100 * sum(p.duration for p in pieces) / total if total else 0.0)
+    note += "；粒度 %s（≤%d 字 / ≤%.0f 秒）" % (
+        "按段" if gran == "para" else "按句",
+        int(params.get("max_chars") or dv["max_chars"]), float(params.get("max_sec") or dv["max_sec"]))
+    too_long = sum(1 for p in pieces if p.duration >= HARD_MAX_SEC)
+    if too_long:
+        note += "；%d 段超过 %.0f 秒，s2 训练会静默丢弃它们，建议改用按句" % (too_long, HARD_MAX_SEC)
     model = str(info.get("model") or "")
     if hw:
         note += "；热词 %d 个（%s）" % (len(hw.split()), "SeACo" if "seaco" in model else "模型不支持热词")

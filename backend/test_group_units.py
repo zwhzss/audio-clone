@@ -76,6 +76,18 @@ check("每片时长不超上限的 1.3 倍+一个从句", all(g.end - g.start <=
       [round(g.end - g.start, 1) for g in g30])
 check("上限逼出的断点仍在标点后", all(_is_final(g.text) for g in g30), [g.text[-5:] for g in g30])
 
+print("\n=== 3b. s2 静默丢弃线（54 秒）硬护栏 ===")
+# 全程只有逗号、没有任何句末标点：再高的上限也不该产出 >=54 秒的片段
+run = [U("第%d个从句说得又长又连贯，" % i, i * 5.0, i * 5.0 + 4.6) for i in range(40)]
+for cap in (20.0, 30.0, 90.0):
+    gc = group_units(run, "para", 3000, cap, 0.0)
+    longest = max((g.end - g.start) for g in gc)
+    check("上限 %.0fs 时最长片仍 <54s（cap=%d）" % (cap, len(gc)), longest < 54.0,
+          "最长 %.1fs，%d 片" % (longest, len(gc)))
+    check("非句末收尾的片都带了标记（cap_comma 或 no_break）",
+          all(_is_final(g.text) or (g.flags or "") != "" for g in gc),
+          [(g.text[-6:], g.flags) for g in gc if not _is_final(g.text) and not g.flags][:3])
+
 print("\n=== 4. 碎块并入邻片 ===")
 frag = [U("好。", 0.0, 0.4), U("这一句正常长度够长了。", 0.4, 3.0), U("短。", 3.0, 3.3)]
 gm = group_units(frag, "sentence", max_chars=300, max_sec=30.0, min_piece=1.0)

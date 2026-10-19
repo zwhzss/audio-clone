@@ -118,8 +118,9 @@ for tid, title, duration, sc, ts in db.execute(
     check("任务 %s(%s) 磁盘==库==计数" % (tid, (title or "")[:14]), len(files) == dbr == sc,
           (len(files), dbr, sc))
     check("任务 %s 覆盖率 >= 95%%" % tid, cov >= 95, "%.1f%%" % cov)
-    check("任务 %s 单片时长都在 0.3~15 秒" % tid,
-          all(0.3 <= d <= 15 for _t, d, _f in rows), round(max(d for _t, d, _f in rows), 2) if rows else "-")
+    # 段模式允许到 ~20 秒（+宽限），句模式 ~10 秒；真正的红线是 s2 的 54 秒静默丢弃线
+    check("任务 %s 单片时长在 0.3~54 秒内（s2 静默丢弃线）" % tid,
+          all(0.3 <= d <= 53.9 for _t, d, _f in rows), round(max(d for _t, d, _f in rows), 2) if rows else "-")
     if lab < len(rows):
         note("任务 %s 有 %d/%d 段未标注" % (tid, len(rows) - lab, len(rows)))
 

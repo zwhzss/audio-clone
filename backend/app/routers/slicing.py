@@ -22,8 +22,9 @@ from sqlalchemy.orm import Session
 from ..config import STORAGE
 from ..db import get_db
 from ..jobs import enqueue
-from ..slicing import (DEFAULTS, AudioSlice, SliceTask, asr_label_batch, asr_one, build_export,
-                       cut_piece, media_duration, run_slice_pipeline, slice_by_silence)
+from ..slicing import (ALIGN_DEFAULTS, DEFAULTS, AudioSlice, SliceTask, asr_label_batch, asr_one,
+                       build_export, cut_piece, media_duration, run_slice_pipeline,
+                       slice_by_silence)
 
 router = APIRouter(prefix="/api/slicing", tags=["slicing"])
 
@@ -121,8 +122,8 @@ class ProcessBody(BaseModel):
     redo: bool = False          # True=清掉旧片段重新切；False=只在后面追加
     mode: str = "align"         # silence=按静音切 | align=识别对齐（句子/词绝不被劈开）
     granularity: str = "para"   # align 时：para=按段（若干完整句）| sentence=按句
-    max_chars: int = 300        # align 段模式：一段最多多少字
-    max_sec: float = 30.0       # align 段模式：一段最长多少秒
+    max_chars: int | None = None  # align 段模式：一段最多多少字（不传=按粒度取推荐缺省）
+    max_sec: float | None = None  # align 段模式：一段最长多少秒（不传=按粒度取推荐缺省）
     hotwords: str | None = None  # align 时的热词（空格/逗号分隔的专名表）
 
 
@@ -143,12 +144,22 @@ def process(task_id: str, body: ProcessBody, db: Session = Depends(get_db)):
         if v is not None:
             params[k] = v
     params["mode"] = body.mode if body.mode in ("silence", "align") else "align"
-    if params["granularity"] not in ("para", "sentence"):
+    if params.get("granularity") not in ("para", "sentence"):
         raise HTTPException(400, "granularity 只能是 para（按段）或 sentence（按句）")
-    if not 30 <= int(params["max_chars"]) <= 2000:
-        raise HTTPException(400, "max_chars 应在 30~2000 字之间")
-    if not 3 <= float(params["max_sec"]) <= 120:
-        raise HTTPException(400, "max_sec 应在 3~120 秒之间")
+    # 不传就用该粒度的推荐缺省值；传了就校验。实际生效值写回任务参数，界面能看到用的是什么
+    dv = ALIGN_DEFAULTS.get(params.get("granularity") or "para", ALIGN_DEFAULTS["para"])
+    if body.max_chars is None:
+        params["max_chars"] = dv["max_chars"]
+    else:
+        if not 30 <= int(body.max_chars) <= 2000:
+            raise HTTPException(400, "max_chars 应在 30~2000 字之间")
+        params["max_chars"] = int(body.max_chars)
+    if body.max_sec is None:
+        params["max_sec"] = dv["max_sec"]
+    else:
+        if not 3 <= float(body.max_sec) <= 120:
+            raise HTTPException(400, "max_sec 应在 3~120 秒之间")
+        params["max_sec"] = float(body.max_sec)
     if params["min_piece"] < 0.2 or params["min_piece"] > 10:
         raise HTTPException(400, "min_piece 应在 0.2~10 秒之间")
     if 0 < params["max_piece"] < params["min_piece"]:

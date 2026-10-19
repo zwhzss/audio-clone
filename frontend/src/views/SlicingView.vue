@@ -23,8 +23,17 @@ const splitAt = reactive({})    // slice_id -> 拆分秒数输入
 
 const params = reactive({
   noise_db: -35, min_silence: 0.5, min_piece: 1.0, max_piece: 10.0, merge_gap: 3.0,
-  mode: 'align', granularity: 'para', max_chars: 300, max_sec: 30, hotwords: '',
+  mode: 'align', granularity: 'para', max_chars: 300, max_sec: 20, hotwords: '',
 })
+// 与后端 ALIGN_DEFAULTS 保持一致：段 ≤20 秒（s1 语感），句 ≤10 秒（s2 音色，官方量级）
+const ALIGN_DEFAULTS = { para: { max_chars: 300, max_sec: 20 }, sentence: { max_chars: 120, max_sec: 10 } }
+function onGranularity() {
+  const d = ALIGN_DEFAULTS[params.granularity]
+  if (!d) return
+  params.max_chars = d.max_chars
+  params.max_sec = d.max_sec
+  toast(`已套用推荐上限：≤${d.max_chars} 字 / ≤${d.max_sec} 秒`)
+}
 
 // 三档预设：数值来自 180 秒真实评书音频的参数扫描（覆盖率均为 100%）
 const PRESETS = {
@@ -260,15 +269,15 @@ const fmt = (n) => (n || 0).toFixed(2)
       </label>
       <template v-if="params.mode === 'align'">
         <label>粒度
-          <select v-model="params.granularity">
+          <select v-model="params.granularity" @change="onGranularity">
             <option value="para">按段（若干完整句，适合 s1 语感）</option>
             <option value="sentence">按句（一句一片，适合 s2 音色）</option>
           </select>
         </label>
-        <label v-if="params.granularity === 'para'">每段最多 <b>{{ params.max_chars }}</b> 字
+        <label>每片最多 <b>{{ params.max_chars }}</b> 字
           <input type="range" min="60" max="800" step="20" v-model.number="params.max_chars" />
         </label>
-        <label v-if="params.granularity === 'para'">每段最长 <b>{{ params.max_sec }}</b>s
+        <label>每片最长 <b>{{ params.max_sec }}</b>s
           <input type="range" min="5" max="90" step="5" v-model.number="params.max_sec" />
         </label>
       </template>
