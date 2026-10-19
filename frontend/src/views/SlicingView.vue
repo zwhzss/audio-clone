@@ -118,7 +118,7 @@ async function openTask(t) {
 async function loadSlices() {
   if (!cur.value) return
   const r = await api.sliceList(cur.value.id, page.value, size, q.value,
-    filter.value === 'unlabeled', filter.value === 'deleted')
+    filter.value === 'unlabeled', filter.value === 'deleted', filter.value === 'flagged')
   slices.value = r.items || []
   // 编辑框必须预填已识别文本：留空的话显示的是灰色占位符，看着像只读
   slices.value.forEach((s) => { drafting[s.id] = s.text || "" })
@@ -349,6 +349,7 @@ const fmt = (n) => (n || 0).toFixed(2)
         <select v-model="filter" @change="goto(1)">
           <option value="all">全部片段</option>
           <option value="unlabeled">只看未标注</option>
+          <option value="flagged">只看可疑（边界不理想）</option>
           <option value="deleted">只看已删除（可恢复）</option>
         </select>
       </label>
@@ -365,6 +366,10 @@ const fmt = (n) => (n || 0).toFixed(2)
     <div v-if="cur.error" class="job-line" style="color:var(--err);">✗ {{ cur.error }}</div>
     <div v-if="cur.unlabeled_count" class="job-line" style="color:#d97706;">
       有 {{ cur.unlabeled_count }} 段没有标注文字：可点「重标空白」，或手动补写。
+    </div>
+    <div v-if="cur.flagged_count" class="job-line" style="color:#d97706; cursor:pointer;"
+         @click="filter = 'flagged'; goto(1)" title="点一下就只列这些片段">
+      ⚠ {{ cur.flagged_count }} 段刀口不理想（没等到句末标点，或引号没闭合）—— 优先听这几段，点本行直接筛出来。
     </div>
 
     <div v-if="imp.open" class="card" style="margin:0 0 12px; background:rgba(255,255,255,.03);">

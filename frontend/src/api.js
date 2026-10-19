@@ -140,8 +140,8 @@ export const api = {
   sliceProcess: (id, b = {}) => req(`/slicing/${id}/process`, { method: 'POST', body: JSON.stringify(b) }),
   sliceTasks: (page = 1, size = 12, q = '') => req(`/slicing?page=${page}&size=${size}&q=${encodeURIComponent(q)}`),
   sliceTask: (id) => req(`/slicing/${id}`),
-  sliceList: (id, page = 1, size = 50, q = '', onlyUnlabeled = false, deletedOnly = false) =>
-    req(`/slicing/${id}/slices?page=${page}&size=${size}&q=${encodeURIComponent(q)}&only_unlabeled=${onlyUnlabeled ? 1 : 0}&deleted_only=${deletedOnly ? 1 : 0}`),
+  sliceList: (id, page = 1, size = 50, q = '', onlyUnlabeled = false, deletedOnly = false, onlyFlagged = false) =>
+    req(`/slicing/${id}/slices?page=${page}&size=${size}&q=${encodeURIComponent(q)}&only_unlabeled=${onlyUnlabeled ? 1 : 0}&deleted_only=${deletedOnly ? 1 : 0}&only_flagged=${onlyFlagged ? 1 : 0}`),
   sliceStats: (id) => req(`/slicing/${id}/stats`),
   sliceUpdateText: (sid, text) => req(`/slicing/slices/${sid}`, { method: 'PATCH', body: JSON.stringify({ text }) }),
   sliceDelete: (sid) => req(`/slicing/slices/${sid}`, { method: 'DELETE' }),
@@ -184,7 +184,12 @@ export const api = {
     fd.append('source', source)
     return upload(`/humans/${id}/data-upload`, fd)
   },
-  humanDataProcess: (id, mode = 'replace', source = 'main') => req(`/humans/${id}/data-process?mode=${mode}&source=${source}`, { method: 'POST' }),
+  humanDataProcess: (id, mode = 'replace', source = 'main', opts = {}) => {
+    const q = new URLSearchParams({ mode, source, slice_mode: opts.mode || 'silence',
+                                    granularity: opts.granularity || 'para' })
+    if (opts.hotwords) q.set('hotwords', opts.hotwords)
+    return req(`/humans/${id}/data-process?${q.toString()}`, { method: 'POST' })
+  },
   trainHuman: (id, b) => req(`/humans/${id}/train`, { method: 'POST', body: JSON.stringify(b) }),
   humanBaseModels: (id) => req(`/humans/${id}/base-models`),
   humanCheckpoints: (id) => req(`/humans/${id}/checkpoints`),

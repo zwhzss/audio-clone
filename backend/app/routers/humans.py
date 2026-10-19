@@ -17,7 +17,7 @@ from ..db import get_db
 from ..digital_human import DigitalHuman, INFERENCE_PRESETS, TRAINING_PRESETS_8GB, analyze_training_data
 from ..training_record import TrainingRecord, scan_data_hashes, check_duplicates
 from ..models import Voice, AIModel, get_active_model
-from ..slicing import asr_label_batch, slice_by_silence
+from ..slicing import asr_label_batch, run_slice_pipeline
 
 router = APIRouter(prefix="/api/humans", tags=["humans"])
 
@@ -317,11 +317,16 @@ async def upload_training_audio(human_id: str, file: UploadFile, mode: str = For
 
 
 @router.post("/{human_id}/data-process")
-def process_training_data(human_id: str, mode: str = "replace", source: str = "main", db: Session = Depends(get_db)):
-    """自动处理：逐个音频按静音切片 → ASR 标注 → 生成可校对列表。
+def process_training_data(human_id: str, mode: str = "replace", source: str = "main",
+                          slice_mode: str = "silence", granularity: str = "para",
+                          max_chars: int = 300, max_sec: float = 30.0, hotwords: str = "",
+                          db: Session = Depends(get_db)):
+    """自动处理：逐个音频切片 → ASR 标注 → 生成可校对列表。
 
     mode: replace=清空旧数据重建（默认）；append=只处理 uploads/ 下的新文件，保留旧切片与标注。
     source: main/s1/s2 数据源目录。
+    slice_mode: silence=按静音（快）；align=先整条识别拿标点时间戳，只在句子边界下刀，
+                标注随识别一次到位（s1 语感用 granularity=para，s2 音色用 sentence）。
     """
     h = db.get(DigitalHuman, human_id)
     if not h:
@@ -378,12 +383,21 @@ def process_training_data(human_id: str, mode: str = "replace", source: str = "m
     # 旧实现有个致命缺陷：两刀之间不足 1.5 秒时它照样推进游标，等于把那段语音直接丢掉；
     # 数值口径保持与过去一致（不强制细分长段），只把「丢」改成「并」。
     slice_params = {"noise_db": -35.0, "min_silence": 0.5, "min_piece": 1.0,
-                    "max_piece": 0.0, "merge_gap": 1.5}
+                    "max_piece": 0.0, "merge_gap": 1.5,
+                    "mode": slice_mode if slice_mode in ("silence", "align") else "silence",
+                    "granularity": granularity if granularity in ("para", "sentence") else "para",
+                    "max_chars": max(30, min(2000, int(max_chars))),
+                    "max_sec": max(3.0, min(120.0, float(max_sec))),
+                    "hotwords": (hotwords or "").strip()[:2000]}
+    align_cache = d / "_align"
     new_pieces = []
     failed = []
+    notes = []
     for raw in raw_files:
         try:
-            pieces = slice_by_silence(raw, d, slice_params, start_index=index)
+            pieces, note = run_slice_pipeline(
+                raw, d, slice_params, start_index=index,
+                cache_path=align_cache / (raw.stem + ".json"))
         except Exception as e:  # 一份文件读不动不该拖垮整批
             failed.append("%s（%s）" % (raw.name, str(e)[:50]))
             continue
@@ -391,10 +405,16 @@ def process_training_data(human_id: str, mode: str = "replace", source: str = "m
             shutil.copy2(p.path, sliced_dir / p.name)
         new_pieces.extend(pieces)
         index += len(pieces)
+        if note:
+            notes.append(note)
 
     # ---- ASR 自动标注：走分片模块同一条路径（官方 funasr_asr.py，缺失时自动降级）----
     # 只标本次新切的片段：append 模式下旧切片的文本已在数据库里，不必重识别。
-    asr_texts, asr_note = asr_label_batch([p.path for p in new_pieces], d / "_asr", "zh")
+    if slice_params["mode"] == "align":
+        asr_texts = {p.name: (p.text or "") for p in new_pieces}   # 识别对齐自带标注
+        asr_note = "；".join(notes)
+    else:
+        asr_texts, asr_note = asr_label_batch([p.path for p in new_pieces], d / "_asr", "zh")
 
     # 生成 train.list（训练用）+ 写入数据库（主数据源）
     from ..digital_human import _classify_text
@@ -418,11 +438,11 @@ def process_training_data(human_id: str, mode: str = "replace", source: str = "m
             )
         ).scalars().all()
         start_order = (max(orders) + 1) if orders else 0
-    # 写入切片记录（标记 data_dir）
-    for i, wav in enumerate(wavs):
-        audio_rel = wav.name
-        text = asr_texts.get(audio_rel, "")
-        s = TrainingSlice(human_id=human_id, audio=audio_rel, text=text, lang="zh", category="other", sort_order=start_order + i, data_dir=_nd(d))
+    # 写入切片记录（标记 data_dir 与可疑 flags）
+    for i, pc in enumerate(new_pieces):
+        s = TrainingSlice(human_id=human_id, audio=pc.name, text=asr_texts.get(pc.name, ""),
+                          lang="zh", category="other", sort_order=start_order + i,
+                          data_dir=_nd(d), flags=pc.flags)
         db.add(s)
     db.commit()
     # train.list：从数据库全量生成（append 时含旧+新记录）
@@ -450,11 +470,18 @@ def process_training_data(human_id: str, mode: str = "replace", source: str = "m
         msg = "没切出任何片段：" + ("、".join(failed) if failed else "音频可能没有可识别的人声")
     elif failed:
         msg += "；跳过读不动的文件：" + "、".join(failed)
+    n_flagged = sum(1 for p in new_pieces if p.flags)
+    if slice_params["mode"] == "align" and asr_note:
+        msg += "；" + asr_note
+    if n_flagged:
+        msg += f"；{n_flagged} 段边界可疑，建议优先校对"
 
     return {
         "sliced_files": len(wavs),
         "list_file": "train.list",
         "asr_labeled": labeled,
+        "flagged": n_flagged,
+        "slice_mode": slice_params["mode"],
         "mode": mode,
         "failed": failed,
         "message": msg,
@@ -542,6 +569,7 @@ def list_training_data(human_id: str, page: int = 1, size: int = 20, source: str
             "text": s.text or "",
             "lang": s.lang,
             "category": s.category,
+            "flags": s.flags or "",
             "audio_url": f"/api/humans/{human_id}/audio/{s.audio}?source={source}",
         })
 

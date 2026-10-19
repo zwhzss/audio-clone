@@ -27,6 +27,8 @@ const dataSize = ref(20)
 const dataPages = ref(1)
 const dataTotal = ref(0)
 const dataSource = ref('main') // main=主数据 / s1=语感数据 / s2=音色数据
+// 切分方式：silence=按静音（快）；align=先整条识别拿标点时间戳，只在句子边界下刀且自带标注
+const sliceOpts = reactive({ mode: 'silence', granularity: 'para' })
 const dataSourceLabel = { main: '主数据', s1: '🗣 s1 语感数据', s2: '🎤 s2 音色数据' }
 
 onMounted(async () => {
@@ -284,7 +286,7 @@ async function uploadAudio(e) {
     } else {
       toast(`音频已上传（${r.duration}s）${mode === 'append' ? '，追加模式保留旧数据' : '，替换模式已清空旧数据'}，正在切片…`)
     }
-    const p = await api.humanDataProcess(detail.value.id, mode, src)
+    const p = await api.humanDataProcess(detail.value.id, mode, src, sliceOpts)
     toast(`${p.message}`)
     await loadTrainingData()
   } catch (e) { errToast(e) }
@@ -297,7 +299,7 @@ async function processDir() {
   uploadBusy.value = true
   try {
     await updateHuman() // 先保存目录设置
-    const p = await api.humanDataProcess(detail.value.id, 'replace', dataSource.value)
+    const p = await api.humanDataProcess(detail.value.id, 'replace', dataSource.value, sliceOpts)
     toast(`${p.message}`)
     await loadTrainingData()
   } catch (e) { errToast(e) }
@@ -521,6 +523,24 @@ async function startTraining() {
             <button class="btn primary" @click="updateHuman" style="margin-bottom:12px;">💾 保存目录</button>
             <button class="btn" @click="loadTrainingData()" :disabled="!detail.data_dir" style="margin-bottom:12px; margin-left:8px;">📂 加载数据</button>
           </template>
+          <!-- 切分方式：与「音频分片」模块同一套实现 -->
+          <div class="row" style="gap:10px; align-items:flex-end; margin-bottom:10px; flex-wrap:wrap;">
+            <label>切分方式
+              <select v-model="sliceOpts.mode">
+                <option value="silence">按静音（快，可能腰斩句子）</option>
+                <option value="align">识别对齐（句子完整，自带标注）</option>
+              </select>
+            </label>
+            <label v-if="sliceOpts.mode === 'align'">粒度
+              <select v-model="sliceOpts.granularity">
+                <option value="para">按段（适合 s1 语感）</option>
+                <option value="sentence">按句（适合 s2 音色）</option>
+              </select>
+            </label>
+            <span v-if="sliceOpts.mode === 'align'" class="hint" style="font-size:11px;">
+              先把整条音频识别一次（慢一些），刀口只落在标点之后，标注随识别到位、不再二次 ASR。
+            </span>
+          </div>
           <!-- s1/s2 目录设置：可留空自动创建，也可自定义路径后直接放文件 -->
           <template v-if="dataSource === 's1' || dataSource === 's2'">
             <label class="field"><span>{{ dataSourceLabel[dataSource] }}目录路径</span>
@@ -560,6 +580,8 @@ async function startTraining() {
                 <span class="badge" :class="item.text && item.saved ? 'ok' : 'err'">
                   {{ item.text && item.saved ? '✅ 已标注' : item.text ? '⏳ 保存中…' : '待标注' }}
                 </span>
+                <span v-if="item.flags" class="badge" title="刀口没等到句末标点或引号未闭合，建议先听这一段"
+                      style="color:#d97706;">⚠ 边界可疑</span>
               </div>
               <!-- 在线播放 -->
               <audio v-if="item.audio_url" :src="item.audio_url" controls style="width:100%; height:32px;"></audio>

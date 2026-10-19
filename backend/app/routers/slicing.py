@@ -22,9 +22,8 @@ from sqlalchemy.orm import Session
 from ..config import STORAGE
 from ..db import get_db
 from ..jobs import enqueue
-from ..slicing import (DEFAULTS, AudioSlice, SliceTask, align_units, asr_label_batch, asr_one,
-                       build_export, cut_groups, cut_piece, group_units, media_duration,
-                       silence_ranges, slice_by_silence, snap_cuts)
+from ..slicing import (DEFAULTS, AudioSlice, SliceTask, asr_label_batch, asr_one, build_export,
+                       cut_piece, media_duration, run_slice_pipeline, slice_by_silence)
 
 router = APIRouter(prefix="/api/slicing", tags=["slicing"])
 
@@ -180,49 +179,15 @@ def process(task_id: str, body: ProcessBody, db: Session = Depends(get_db)):
                 start_index = (d2.get(SliceTask, task_id).slice_count or 0) + 1
                 sdir.mkdir(parents=True, exist_ok=True)
             if params.get("mode") == "align":
-                total = media_duration(src)
-                hw = (t2.hotwords or "").strip()
+                sp = dict(params, hotwords=(t2.hotwords or "").strip())
                 update(4, "整条音频识别（带时间戳）…")
-                cache = d / "sentences.json"
-                units, info = None, {}
-                if cache.exists():
-                    try:
-                        info = json.loads(cache.read_text(encoding="utf-8"))
-                    except Exception:  # 缓存坏了就重识别
-                        info = {}
-                    # 热词变了必须重识别，否则会沿用没有偏置的旧文本
-                    if info.get("units") and (info.get("hotwords") or "").strip() == hw:
-                        units = info["units"]
-                        update(30, "复用上次识别结果（%d 个标点单元）…" % len(units))
-                if not units:
-                    units = align_units(src, cache, hw)
-                    info = json.loads(cache.read_text(encoding="utf-8"))
-                update(55, "按句子边界归片…")
-                groups = group_units(units, params.get("granularity") or "para",
-                                     int(params.get("max_chars") or 300),
-                                     float(params.get("max_sec") or 30.0),
-                                     float(params.get("min_piece") or 1.0))
-                groups = snap_cuts(groups, silence_ranges(src, float(params["noise_db"]),
-                                                           float(params["min_silence"])), total)
-                pieces = cut_groups(src, sdir, groups, start_index=start_index, progress=update)
-                if not pieces:
-                    raise RuntimeError("识别对齐模式没切出任何片段（源音频可能没有人声）")
+                pieces, note = run_slice_pipeline(src, sdir, sp, start_index=start_index,
+                                                  cache_path=d / "sentences.json", progress=update)
                 for p in pieces:
                     d2.add(AudioSlice(task_id=task_id, name=p.name, text=(p.text or "")[:2000],
                                       start=p.start, end=p.end, duration=p.duration, flags=p.flags))
                 d2.commit()
                 _refresh_task(d2, t2)
-                flagged = sum(1 for p in pieces if p.flags)
-                note = "识别对齐：%d 个标点单元 → %d 片，覆盖 %.1f%%" % (
-                    len(units), len(pieces), 100 * sum(p.duration for p in pieces) / total
-                    if total else 0.0)
-                model = str(info.get("model") or "")
-                if hw:
-                    note += "；热词 %d 个（%s）" % (len(hw.split()), "SeACo" if "seaco" in model else "模型不支持热词")
-                    if "seaco" not in model:
-                        note += "！实际用的是 %s，它不吃热词，热词没生效 —— 需下载 SeACo-Paraformer" % (model or "默认模型")
-                if flagged:
-                    note += "；%d 片边界可疑（引号未闭合或无句末标点），请优先试听" % flagged
                 t2.note = note
                 t2.status = "done"
                 t2.finished_at = datetime.now()
@@ -314,6 +279,10 @@ def task_detail(task_id: str, db: Session = Depends(get_db)):
             AudioSlice.task_id == task_id, AudioSlice.is_deleted == 0, AudioSlice.text == "")
     ).scalar() or 0
     d["unlabeled_count"] = pend
+    d["flagged_count"] = db.execute(
+        select(func.count()).select_from(AudioSlice).where(
+            AudioSlice.task_id == task_id, AudioSlice.is_deleted == 0,
+            AudioSlice.flags != "")).scalar() or 0
     d["defaults"] = DEFAULTS
     return d
 
@@ -355,8 +324,8 @@ def delete_task(task_id: str, db: Session = Depends(get_db)):
 @router.get("/{task_id}/slices")
 def list_slices(task_id: str, page: int = 1, size: int = 50, q: str = "",
                 only_unlabeled: bool = False, deleted_only: bool = False,
-                db: Session = Depends(get_db)):
-    """片段列表。`deleted_only=1` 用来查看已删除的片段并恢复（软删除必须可反悔）。"""
+                only_flagged: bool = False, db: Session = Depends(get_db)):
+    """片段列表。`deleted_only=1` 查看已删除的片段并恢复；`only_flagged=1` 只看待校对的可疑片段。"""
     if not db.get(SliceTask, task_id):
         raise HTTPException(404, "任务不存在")
     stmt = select(AudioSlice).where(
@@ -369,6 +338,8 @@ def list_slices(task_id: str, page: int = 1, size: int = 50, q: str = "",
     rows = db.execute(stmt.order_by(AudioSlice.idx, AudioSlice.start)).scalars().all()
     if only_unlabeled and not deleted_only:
         rows = [r for r in rows if not (r.text or "").strip()]
+    if only_flagged and not deleted_only:
+        rows = [r for r in rows if (r.flags or "").strip()]
     total = len(rows)
     page, size = max(1, page), max(1, min(500, size))
     st = (page - 1) * size

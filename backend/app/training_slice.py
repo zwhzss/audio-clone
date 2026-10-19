@@ -22,3 +22,4 @@ class TrainingSlice(Base):
     sort_order = Column(Integer, default=0)           # 排序序号
     data_dir = Column(String(500), default="")        # 数据目录（区分不同训练批次）
     slice_task_id = Column(String(16), default="")    # 由音频分片任务导入时记录来源任务 id
+    flags = Column(String(60), default="")            # no_break/quote：识别对齐切分时的可疑标记

@@ -48,9 +48,9 @@ check("对话没被劈开（“朋友，不单独成片）", all(g.text != "“�
 check("刀口只落在标点后（绝不劈词）",
       all(g.text and g.text[-1] in "。！？!?…”』」）)》" or g.text[-1] in "，、,;：" for g in gs),
       [g.text[-3:] for g in gs if g.text and g.text[-1] not in "。！？…，、；”"])
-check("逗号收尾的片都是被上限逼出来的（或末片）",
-      all(_is_final(g.text) or i == len(gs) - 1 or len(g.text) >= 12 or g.duration >= 12
-          for i, g in enumerate(gs)))
+check("非句末收尾的片都带 cap_comma 标记",
+      all(_is_final(g.text) or "cap_comma" in (g.flags or "") for g in gs),
+      [(g.text[-6:], g.flags) for g in gs if not _is_final(g.text)])
 check("拼回去 == 全部识别文本（无损）",
       squash("".join(g.text for g in gs)) == squash("".join(u["text"] for u in DIALOG)))
 check("边界单调且不重叠",
@@ -72,7 +72,7 @@ print("\n=== 3. 时长上限触发断段 ===")
 long_u = [U("第%d句说得很长一点。" % i, i * 5.0, i * 5.0 + 4.5) for i in range(10)]
 g30 = group_units(long_u, "para", max_chars=300, max_sec=12.0, min_piece=0.0)
 check("max_sec=12 会切成多片", len(g30) >= 4, len(g30))
-check("每片时长不超上限+一个从句", all(g.end - g.start <= 12.0 + 4.6 for g in g30),
+check("每片时长不超上限的 1.3 倍+一个从句", all(g.end - g.start <= 12.0 * 1.3 + 4.6 for g in g30),
       [round(g.end - g.start, 1) for g in g30])
 check("上限逼出的断点仍在标点后", all(_is_final(g.text) for g in g30), [g.text[-5:] for g in g30])
 

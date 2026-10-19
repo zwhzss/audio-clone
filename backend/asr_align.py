@@ -83,6 +83,8 @@ def main() -> int:
         })
     payload = {"source": os.path.abspath(a.src), "device": dev, "model": used,
                "hotwords": a.hotword.strip(), "units": units}
+    # 缓存目录由调用方决定（分片任务用任务目录，数字人用 <数据目录>/_align），可能还不存在
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     tmp = a.out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False)

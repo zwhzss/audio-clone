@@ -115,7 +115,7 @@ def _migrate():
         Segment.__tablename__: ["params", "offset"],
         Project.__tablename__: ["chapters", "digital_human_id", "ref_audio_path", "ref_text"],
         "digital_humans": ["s1_data_dir", "s2_data_dir"],
-        "training_slices": ["slice_task_id"],
+        "training_slices": ["slice_task_id", "flags"],
         "audio_slices": ["flags"],
         "slice_tasks": ["hotwords"],
     }

@@ -309,13 +309,15 @@ def group_units(units: list[dict], granularity: str = "para", max_chars: int = 3
         end = float(u.get("end") or 0.0)
         nxt = len(buf) + len(units[i + 1].get("text") or "") if i + 1 < n else 0
         depth0 = _open_depth(buf) == 0
-        over = len(buf) >= max_chars or end - buf_start >= max_sec
-        # 优先在句末断；被上限逼到没办法时，逗号边界也能下刀（引号已闭合就不会劈词）
-        can_break = depth0 and (_is_final(u.get("text") or "") or over)
+        final = _is_final(u.get("text") or "")
+        # 到上限后先继续找句末，宽限到 1.3 倍；实在等不到才在逗号处断（引号已闭合就不会劈词）
+        over_hard = len(buf) >= max_chars * 1.3 or end - buf_start >= max_sec * 1.3
+        can_break = depth0 and (final or over_hard)
         at_limit = (i == n - 1 or granularity == "sentence" or nxt > max_chars
                     or end - buf_start >= max_sec)
         if can_break and at_limit:
-            groups.append(Group(buf.strip(), round(buf_start, 3), round(end, 3)))
+            groups.append(Group(buf.strip(), round(buf_start, 3), round(end, 3),
+                                "" if final else "cap_comma"))
             buf, buf_start = "", end
         elif i == n - 1 and buf.strip():
             # 走到结尾都没等到合法断点（引号没闭合/全程无句末标点）
@@ -324,12 +326,12 @@ def group_units(units: list[dict], granularity: str = "para", max_chars: int = 3
     carry = None
     for g in groups:
         if carry is not None:
-            g = Group(carry.text + g.text, carry.start, g.end, (carry.flags or g.flags))
+            g = Group(carry.text + g.text, carry.start, g.end, (g.flags or carry.flags))
             carry = None
         if g.duration < min_piece:
             if merged and len(merged[-1].text) + len(g.text) <= max_chars * 2:
                 p = merged[-1]
-                merged[-1] = Group(p.text + g.text, p.start, g.end, (p.flags or g.flags))
+                merged[-1] = Group(p.text + g.text, p.start, g.end, (g.flags or p.flags))
                 continue
             carry = g            # 开头就太短：没有前片可并，留给下一片
             continue
@@ -337,7 +339,7 @@ def group_units(units: list[dict], granularity: str = "para", max_chars: int = 3
     if carry is not None:
         if merged:
             p = merged[-1]
-            merged[-1] = Group(p.text + carry.text, p.start, carry.end, (p.flags or carry.flags))
+            merged[-1] = Group(p.text + carry.text, p.start, carry.end, (carry.flags or p.flags))
         else:
             merged.append(carry)   # 整条音频只有一个短片，只能原样留着
     for g in merged:
@@ -391,6 +393,54 @@ def cut_groups(src: Path, out_dir: Path, groups: list[Group], start_index: int =
         if progress and groups:
             progress(65 + int((i + 1) / len(groups) * 30), "切片 %d/%d…" % (i + 1, len(groups)))
     return pieces
+
+
+def run_slice_pipeline(src: Path, out_dir: Path, params: dict, start_index: int = 1,
+                       cache_path: Path | None = None, progress=None) -> tuple[list[Piece], str]:
+    """按 params["mode"] 分派切分：silence=只认静音，align=整条识别拿标点时间戳再按段/句切。
+
+    返回 (片段列表, 说明文字)。align 模式的标注随识别一起到位，不需要再跑 asr_label_batch；
+    识别结果按热词缓存，热词变了自动作废。分片模块和数字人训练数据都走这一个函数。
+    """
+    if (params.get("mode") or "silence") != "align":
+        return slice_by_silence(src, out_dir, params, start_index=start_index, progress=progress), ""
+
+    total = media_duration(src)
+    if total <= 0:
+        raise RuntimeError("读不到音频时长，文件可能已损坏或格式不支持")
+    hw = (params.get("hotwords") or "").strip()
+    cache = Path(cache_path) if cache_path else out_dir.parent / "sentences.json"
+    units, info = None, {}
+    if cache.exists():
+        try:
+            info = json.loads(cache.read_text(encoding="utf-8"))
+        except Exception:  # 缓存坏了就重识别
+            info = {}
+        if info.get("units") and (info.get("hotwords") or "").strip() == hw:
+            units = info["units"]
+    if not units:
+        units = align_units(src, cache, hw)
+        info = json.loads(cache.read_text(encoding="utf-8"))
+    groups = group_units(units, params.get("granularity") or "para",
+                         int(params.get("max_chars") or 300), float(params.get("max_sec") or 30.0),
+                         float(params.get("min_piece") or 1.0))
+    groups = snap_cuts(groups, silence_ranges(src, float(params.get("noise_db", DEFAULTS["noise_db"])),
+                                              float(params.get("min_silence", DEFAULTS["min_silence"]))),
+                       total)
+    pieces = cut_groups(src, out_dir, groups, start_index=start_index, progress=progress)
+    if not pieces:
+        raise RuntimeError("识别对齐模式没切出任何片段（源音频可能没有人声）")
+    flagged = sum(1 for p in pieces if p.flags)
+    note = "识别对齐：%d 个标点单元 → %d 片，覆盖 %.1f%%" % (
+        len(units), len(pieces), 100 * sum(p.duration for p in pieces) / total if total else 0.0)
+    model = str(info.get("model") or "")
+    if hw:
+        note += "；热词 %d 个（%s）" % (len(hw.split()), "SeACo" if "seaco" in model else "模型不支持热词")
+        if "seaco" not in model:
+            note += "！实际用的是 %s，它不吃热词，热词没生效 —— 需下载 SeACo-Paraformer" % (model or "默认模型")
+    if flagged:
+        note += "；%d 片边界可疑（引号未闭合或无句末标点），请优先试听" % flagged
+    return pieces, note
 
 
 def asr_label_batch(wav_paths: list[Path], work_dir: Path, lang: str = "zh") -> tuple[dict, str]:
