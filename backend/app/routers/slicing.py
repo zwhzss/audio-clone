@@ -22,8 +22,9 @@ from sqlalchemy.orm import Session
 from ..config import STORAGE
 from ..db import get_db
 from ..jobs import enqueue
-from ..slicing import (DEFAULTS, AudioSlice, SliceTask, asr_label_batch, asr_one,
-                       build_export, cut_piece, media_duration, slice_by_silence)
+from ..slicing import (DEFAULTS, AudioSlice, SliceTask, align_units, asr_label_batch, asr_one,
+                       build_export, cut_groups, cut_piece, group_units, media_duration,
+                       silence_ranges, slice_by_silence, snap_cuts)
 
 router = APIRouter(prefix="/api/slicing", tags=["slicing"])
 
@@ -119,6 +120,10 @@ class ProcessBody(BaseModel):
     max_piece: float | None = None
     merge_gap: float | None = None
     redo: bool = False          # True=清掉旧片段重新切；False=只在后面追加
+    mode: str = "silence"       # silence=按静音切 | align=识别对齐（句子/词绝不被劈开）
+    granularity: str = "para"   # align 时：para=按段（若干完整句）| sentence=按句
+    max_chars: int = 300        # align 段模式：一段最多多少字
+    max_sec: float = 30.0       # align 段模式：一段最长多少秒
 
 
 @router.post("/{task_id}/process")
@@ -132,10 +137,18 @@ def process(task_id: str, body: ProcessBody, db: Session = Depends(get_db)):
         raise HTTPException(400, "源音频缺失，请重新上传")
     src = srcs[0]
     params = {**DEFAULTS, **(t.params or {})}
-    for k in ("noise_db", "min_silence", "min_piece", "max_piece", "merge_gap"):
+    for k in ("noise_db", "min_silence", "min_piece", "max_piece", "merge_gap",
+              "granularity", "max_chars", "max_sec"):
         v = getattr(body, k)
         if v is not None:
             params[k] = v
+    params["mode"] = body.mode if body.mode in ("silence", "align") else "silence"
+    if params["granularity"] not in ("para", "sentence"):
+        raise HTTPException(400, "granularity 只能是 para（按段）或 sentence（按句）")
+    if not 30 <= int(params["max_chars"]) <= 2000:
+        raise HTTPException(400, "max_chars 应在 30~2000 字之间")
+    if not 3 <= float(params["max_sec"]) <= 120:
+        raise HTTPException(400, "max_sec 应在 3~120 秒之间")
     if params["min_piece"] < 0.2 or params["min_piece"] > 10:
         raise HTTPException(400, "min_piece 应在 0.2~10 秒之间")
     if 0 < params["max_piece"] < params["min_piece"]:
@@ -163,6 +176,49 @@ def process(task_id: str, body: ProcessBody, db: Session = Depends(get_db)):
             else:
                 start_index = (d2.get(SliceTask, task_id).slice_count or 0) + 1
                 sdir.mkdir(parents=True, exist_ok=True)
+            if params.get("mode") == "align":
+                total = media_duration(src)
+                update(4, "整条音频识别（带时间戳）…")
+                cache = d / "sentences.json"
+                units = None
+                if cache.exists():
+                    try:
+                        units = json.loads(cache.read_text(encoding="utf-8")).get("units") or None
+                    except Exception:  # 缓存坏了就重识别
+                        units = None
+                    if units:
+                        update(30, "复用上次识别结果（%d 个标点单元）…" % len(units))
+                if not units:
+                    units = align_units(src, cache)
+                update(55, "按句子边界归片…")
+                groups = group_units(units, params.get("granularity") or "para",
+                                     int(params.get("max_chars") or 300),
+                                     float(params.get("max_sec") or 30.0),
+                                     float(params.get("min_piece") or 1.0))
+                groups = snap_cuts(groups, silence_ranges(src, float(params["noise_db"]),
+                                                           float(params["min_silence"])), total)
+                pieces = cut_groups(src, sdir, groups, start_index=start_index, progress=update)
+                if not pieces:
+                    raise RuntimeError("识别对齐模式没切出任何片段（源音频可能没有人声）")
+                for p in pieces:
+                    d2.add(AudioSlice(task_id=task_id, name=p.name, text=(p.text or "")[:2000],
+                                      start=p.start, end=p.end, duration=p.duration, flags=p.flags))
+                d2.commit()
+                _refresh_task(d2, t2)
+                flagged = sum(1 for p in pieces if p.flags)
+                note = "识别对齐：%d 个标点单元 → %d 片，覆盖 %.1f%%" % (
+                    len(units), len(pieces), 100 * sum(p.duration for p in pieces) / total
+                    if total else 0.0)
+                if flagged:
+                    note += "；%d 片边界可疑（引号未闭合或无句末标点），请优先试听" % flagged
+                t2.note = note
+                t2.status = "done"
+                t2.finished_at = datetime.now()
+                d2.commit()
+                update(100, "完成：%d 段，已标注 %d 段" % (t2.slice_count, t2.labeled_count))
+                return {"slices": t2.slice_count, "labeled": t2.labeled_count,
+                        "total_sec": t2.total_sec, "note": t2.note}
+
             update(3, "按静音切片中…")
             pieces = slice_by_silence(src, sdir, params, start_index=start_index, progress=update)
             if not pieces:

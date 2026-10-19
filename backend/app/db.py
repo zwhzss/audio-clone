@@ -116,6 +116,7 @@ def _migrate():
         Project.__tablename__: ["chapters", "digital_human_id", "ref_audio_path", "ref_text"],
         "digital_humans": ["s1_data_dir", "s2_data_dir"],
         "training_slices": ["slice_task_id"],
+        "audio_slices": ["flags"],
     }
     with engine.begin() as conn:
         for table, cols in adds.items():
@@ -134,5 +135,6 @@ def _migrate():
                         "s1_data_dir": "VARCHAR(500) DEFAULT ''",
                         "s2_data_dir": "VARCHAR(500) DEFAULT ''",
                         "slice_task_id": "VARCHAR(16) DEFAULT ''",
+                        "flags": "VARCHAR(60) DEFAULT ''",
                     }[col]
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}"))

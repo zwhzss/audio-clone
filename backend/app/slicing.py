@@ -19,6 +19,7 @@ from sqlalchemy import JSON, Column, DateTime, Float, Integer, String, Text
 
 from .db import Base
 from .models import _now, _uid
+from .text_utils import _CLOSE, _PAIRS
 
 AUDIO_EXT = (".wav", ".mp3", ".m4a", ".flac", ".aac", ".ogg")
 # 默认值取「训练素材」档：180 秒真实评书实测 40 段、中位 4.19 秒、100% 落在 3~10 秒、覆盖率 100%
@@ -74,6 +75,7 @@ class AudioSlice(Base):
     duration = Column(Float, default=0.0)
     is_deleted = Column(Integer, default=0)
     edited = Column(Integer, default=0)            # 1 = 人工改过标注
+    flags = Column(String(60), default="")        # no_break/quote：切分可疑标记
     created_at = Column(DateTime, default=_now)
 
     def to_dict(self):
@@ -89,6 +91,21 @@ class Piece:
     start: float
     end: float
     duration: float
+    text: str = ""               # 识别对齐模式下直接带来的标注（静音模式留空待 ASR）
+    flags: str = ""              # no_break / quote 等可疑标记
+
+
+@dataclass
+class Group:
+    """识别对齐模式切出来的一片：完整句子/段落 + 在源音频里的起止秒 + 可疑标记。"""
+    text: str
+    start: float
+    end: float
+    flags: str = ""
+
+    @property
+    def duration(self) -> float:
+        return round(self.end - self.start, 3)
 
 
 def ffmpeg_exe() -> str:
@@ -205,9 +222,175 @@ def cut_piece(src: Path, dst: Path, start: float, end: float) -> bool:
     return ok
 
 
+# ---------------- 识别对齐切分：刀口只落在标点之后 ----------------
+
+_END_PUNCT = "。！？!?…"
+
+
+def silence_ranges(src: Path, noise_db: float, min_silence: float) -> list[tuple[float, float]]:
+    return _silence_ranges(ffmpeg_exe(), src, noise_db, min_silence)
+
+
+def align_units(src: Path, out_json: Path) -> list[dict]:
+    """整条音频识别一次，返回标点级单元 [{text,start,end,chars}]（单位秒）。
+
+    识别器自带的时间戳让我们可以只在标点后面下刀，从根上避免「一个词被劈成两片」。
+    结果缓存到 out_json，改粒度时不必重新识别。
+    """
+    import os
+
+    from .gpt_sovits_train import GPT_SOVITS_ROOT, PYTHON as GS_PYTHON
+
+    script = Path(__file__).resolve().parent.parent / "asr_align.py"
+    if not Path(str(GS_PYTHON)).exists() or not script.exists():
+        raise RuntimeError("缺少带时间戳的识别环境（gpt_sovits 解释器或 asr_align.py）")
+    env = dict(os.environ)
+    env["PYTHONUTF8"] = "1"
+    libbin = Path(str(GS_PYTHON)).parent.parent / "Library" / "bin"
+    if libbin.is_dir():
+        env["PATH"] = str(libbin) + ";" + env.get("PATH", "")
+    r = subprocess.run([str(GS_PYTHON), str(script), "--in", str(src), "--out", str(out_json)],
+                       capture_output=True, timeout=10800, cwd=str(GPT_SOVITS_ROOT), env=env)
+    if not Path(out_json).exists():
+        raise RuntimeError("整条识别失败：%s" % (r.stderr or b"").decode("utf-8", "replace")[-300:])
+    units = json.loads(Path(out_json).read_text(encoding="utf-8")).get("units") or []
+    if not units:
+        raise RuntimeError("整条识别没有产出任何带时间的文本单元")
+    return units
+
+
+def _open_depth(text: str) -> int:
+    """还剩几个引号没闭合。断段只在 0 处下手，否则就是「半边引号」的来源。"""
+    stack: list[str] = []
+    for ch in text or "":
+        if ch == '"':
+            if stack and stack[-1] == '"':
+                stack.pop()
+            else:
+                stack.append('"')
+        elif ch in _PAIRS:
+            stack.append(_PAIRS[ch])
+        elif ch in _CLOSE and stack and stack[-1] == ch:
+            stack.pop()
+    return len(stack)
+
+
+def _is_final(text: str) -> bool:
+    """单元是否以句末标点收尾（允许后面跟着收尾引号/括号）。"""
+    s = (text or "").rstrip()
+    while s and s[-1] in _CLOSE:
+        s = s[:-1]
+    return bool(s) and s[-1] in _END_PUNCT
+
+
+def group_units(units: list[dict], granularity: str = "para", max_chars: int = 300,
+                max_sec: float = 30.0, min_piece: float = 1.0) -> list[Group]:
+    """把标点级识别单元聚成片段，只在「引号已闭合 + 句末标点」处断。
+
+    granularity=para：累计接近字数/时长上限才断（一段含若干完整句子）。
+    granularity=sentence：每个句子边界都断（训练音色用）。
+    低于 min_piece 的碎块并进邻片。
+
+    不变量：刀口永远落在标点之后（且引号已闭合），所以不会劈开词，也不会把一段对话
+    拆成两半。被字数/时长上限逼出来时允许在逗号处断 —— 那仍是完整从句。
+    """
+    if not units:
+        return []
+    groups: list[Group] = []
+    buf = ""
+    buf_start = float(units[0].get("start") or 0.0)
+    n = len(units)
+    for i, u in enumerate(units):
+        buf += (u.get("text") or "")
+        end = float(u.get("end") or 0.0)
+        nxt = len(buf) + len(units[i + 1].get("text") or "") if i + 1 < n else 0
+        depth0 = _open_depth(buf) == 0
+        over = len(buf) >= max_chars or end - buf_start >= max_sec
+        # 优先在句末断；被上限逼到没办法时，逗号边界也能下刀（引号已闭合就不会劈词）
+        can_break = depth0 and (_is_final(u.get("text") or "") or over)
+        at_limit = (i == n - 1 or granularity == "sentence" or nxt > max_chars
+                    or end - buf_start >= max_sec)
+        if can_break and at_limit:
+            groups.append(Group(buf.strip(), round(buf_start, 3), round(end, 3)))
+            buf, buf_start = "", end
+        elif i == n - 1 and buf.strip():
+            # 走到结尾都没等到合法断点（引号没闭合/全程无句末标点）
+            groups.append(Group(buf.strip(), round(buf_start, 3), round(end, 3), "no_break"))
+    merged: list[Group] = []
+    carry = None
+    for g in groups:
+        if carry is not None:
+            g = Group(carry.text + g.text, carry.start, g.end, (carry.flags or g.flags))
+            carry = None
+        if g.duration < min_piece:
+            if merged and len(merged[-1].text) + len(g.text) <= max_chars * 2:
+                p = merged[-1]
+                merged[-1] = Group(p.text + g.text, p.start, g.end, (p.flags or g.flags))
+                continue
+            carry = g            # 开头就太短：没有前片可并，留给下一片
+            continue
+        merged.append(g)
+    if carry is not None:
+        if merged:
+            p = merged[-1]
+            merged[-1] = Group(p.text + carry.text, p.start, carry.end, (p.flags or carry.flags))
+        else:
+            merged.append(carry)   # 整条音频只有一个短片，只能原样留着
+    for g in merged:
+        if _open_depth(g.text) > 0 and "quote" not in g.flags:
+            g.flags = (g.flags + ",quote").strip(",")
+    return merged
+
+
+def snap_cuts(groups: list[Group], silence: list[tuple[float, float]], total: float,
+              window: float = 0.4) -> list[Group]:
+    """把相邻片段的公共边界吸附到最近的静音中点。
+
+    识别器的时间轴首尾相接（相邻间隔 0.00s），直接在刀口两侧加 pad 会让两片重叠，
+    所以只在 ±window 内找真实静音；找不到就保留标点位置。
+    """
+    if not groups:
+        return groups
+    mids = sorted(round((s + e) / 2, 3) for s, e in silence)
+    bounds = []
+    prev = float(groups[0].start)
+    for i in range(len(groups) - 1):
+        t = groups[i].end
+        cand = [m for m in mids if abs(m - t) <= window and m > prev + 0.05]
+        best = min(cand, key=lambda m: abs(m - t)) if cand else max(t, prev + 0.05)
+        bounds.append(round(best, 3))
+        prev = best
+    heads = [groups[0].start] + bounds
+    tails = bounds + [groups[-1].end]
+    out = []
+    for g, s, e in zip(groups, heads, tails):
+        out.append(Group(g.text, round(max(0.0, s), 3), round(min(total, e), 3), g.flags))
+    return out
+
+
+def cut_groups(src: Path, out_dir: Path, groups: list[Group], start_index: int = 1,
+               progress=None) -> list[Piece]:
+    """按 Group 列表切音频文件，返回 Piece（入库用，name 与静音模式同命名规则）。"""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pieces: list[Piece] = []
+    n = start_index
+    for i, g in enumerate(groups):
+        if g.end - g.start < 0.2 or not g.text.strip():
+            continue
+        name = "%03d_%s_seg%d.wav" % (n, src.stem, i + 1)
+        dst = out_dir / name
+        if not cut_piece(src, dst, g.start, g.end):
+            continue
+        pieces.append(Piece(name, dst, g.start, g.end, round(media_duration(dst), 3),
+                            g.text, g.flags))
+        n += 1
+        if progress and groups:
+            progress(65 + int((i + 1) / len(groups) * 30), "切片 %d/%d…" % (i + 1, len(groups)))
+    return pieces
+
+
 def asr_label_batch(wav_paths: list[Path], work_dir: Path, lang: str = "zh") -> tuple[dict, str]:
     """批量标注。返回 ({文件名: 文本}, 说明)。
-
     优先用 GPT-SoVITS 自带的 funasr_asr.py：它带标点模型，标注可直接当训练文本用。
     环境/脚本缺失时退回常驻 sidecar（无标点），仍失败就返回空表让界面转人工标注。
     """

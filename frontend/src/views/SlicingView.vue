@@ -21,7 +21,10 @@ const jobId = ref('')
 const drafting = reactive({})   // slice_id -> 正在编辑的文本
 const splitAt = reactive({})    // slice_id -> 拆分秒数输入
 
-const params = reactive({ noise_db: -35, min_silence: 0.5, min_piece: 1.0, max_piece: 10.0, merge_gap: 3.0 })
+const params = reactive({
+  noise_db: -35, min_silence: 0.5, min_piece: 1.0, max_piece: 10.0, merge_gap: 3.0,
+  mode: 'align', granularity: 'para', max_chars: 300, max_sec: 30,
+})
 
 // 三档预设：数值来自 180 秒真实评书音频的参数扫描（覆盖率均为 100%）
 const PRESETS = {
@@ -241,6 +244,33 @@ const fmt = (n) => (n || 0).toFixed(2)
       <span class="muted" style="font-size:12px; line-height:26px;">预设：</span>
       <button v-for="(v, k) in PRESETS" :key="k" class="btn small" @click="applyPreset(k)">{{ v.label }}</button>
     </div>
+    <div class="row" style="gap:10px; flex-wrap:wrap; align-items:flex-end; margin-top:6px;">
+      <label>切分方式
+        <select v-model="params.mode">
+          <option value="align">识别对齐（句子完整，词不劈开）</option>
+          <option value="silence">按静音切（快，可能腰斩句子）</option>
+        </select>
+      </label>
+      <template v-if="params.mode === 'align'">
+        <label>粒度
+          <select v-model="params.granularity">
+            <option value="para">按段（若干完整句，适合 s1 语感）</option>
+            <option value="sentence">按句（一句一片，适合 s2 音色）</option>
+          </select>
+        </label>
+        <label v-if="params.granularity === 'para'">每段最多 <b>{{ params.max_chars }}</b> 字
+          <input type="range" min="60" max="800" step="20" v-model.number="params.max_chars" />
+        </label>
+        <label v-if="params.granularity === 'para'">每段最长 <b>{{ params.max_sec }}</b>s
+          <input type="range" min="5" max="90" step="5" v-model.number="params.max_sec" />
+        </label>
+      </template>
+    </div>
+    <div class="muted" style="font-size:11px; margin-top:4px;">
+      识别对齐会先把整条音频识别一次（拿到标点级时间戳），刀口只落在「引号已闭合的句末」，
+      所以不会出现「上半句在这片、下半句跑那片」。识别结果缓存在
+      <span class="mono">sentences.json</span>，之后换粒度不用重新识别。静音模式更快但只认声学停顿。
+    </div>
     <div class="row" style="gap:14px; margin-top:12px; flex-wrap:wrap; font-size:12px;">
       <label>静音阈值 <b>{{ params.noise_db }} dB</b>
         <input type="range" min="-60" max="-15" step="1" v-model.number="params.noise_db" />
@@ -248,13 +278,13 @@ const fmt = (n) => (n || 0).toFixed(2)
       <label>最短片段 <b>{{ params.min_piece }}s</b>
         <input type="range" min="0.3" max="5" step="0.1" v-model.number="params.min_piece" />
       </label>
-      <label>最长片段 <b>{{ params.max_piece }}s</b>
+      <label v-show="params.mode === 'silence'">最长片段 <b>{{ params.max_piece }}s</b>
         <input type="range" min="0" max="60" step="1" v-model.number="params.max_piece" />
       </label>
       <label>静音时长 <b>{{ params.min_silence }}s</b>
         <input type="range" min="0.2" max="2" step="0.1" v-model.number="params.min_silence" />
       </label>
-      <label>合并间隔 <b>{{ params.merge_gap }}s</b>
+      <label v-show="params.mode === 'silence'">合并间隔 <b>{{ params.merge_gap }}s</b>
         <input type="range" min="0.5" max="8" step="0.5" v-model.number="params.merge_gap" />
       </label>
     </div>
@@ -377,6 +407,9 @@ const fmt = (n) => (n || 0).toFixed(2)
               <textarea v-model="drafting[s.id]" :placeholder="s.text || '（无标注，可手填）'" rows="2"
                         style="width:100%; box-sizing:border-box; font-size:12px;"></textarea>
               <span v-if="s.edited" class="badge" style="font-size:10px;">已人工修改</span>
+              <span v-if="s.flags" class="badge" style="font-size:10px; color:#d97706;"
+                    :title="s.flags.includes('quote') ? '引号未闭合，刀口可能不理想' : '整段没等到句末标点，只能在上限处切'">
+                ⚠ 边界可疑</span>
             </template>
           </td>
           <td class="mono muted">{{ fmt(s.start) }}~{{ fmt(s.end) }}</td>
