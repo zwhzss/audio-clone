@@ -28,7 +28,7 @@ const dataPages = ref(1)
 const dataTotal = ref(0)
 const dataSource = ref('main') // main=主数据 / s1=语感数据 / s2=音色数据
 // 切分方式：silence=按静音（快）；align=先整条识别拿标点时间戳，只在句子边界下刀且自带标注
-const sliceOpts = reactive({ mode: 'silence', granularity: 'para' })
+const sliceOpts = reactive({ mode: 'silence', granularity: 'para', hotwords: '' })
 const dataSourceLabel = { main: '主数据', s1: '🗣 s1 语感数据', s2: '🎤 s2 音色数据' }
 
 onMounted(async () => {
@@ -540,6 +540,18 @@ async function startTraining() {
             <span v-if="sliceOpts.mode === 'align'" class="hint" style="font-size:11px;">
               先把整条音频识别一次（慢一些），刀口只落在标点之后，标注随识别到位、不再二次 ASR。
             </span>
+          </div>
+          <div v-if="sliceOpts.mode === 'align'" style="margin-bottom:10px;">
+            <label style="font-size:12px;">热词（可选，空格或逗号分隔）—— 专名老被同音写错时才填
+              <textarea v-model="sliceOpts.hotwords" rows="2"
+                        style="width:100%; box-sizing:border-box; font-size:12px;"
+                        placeholder="例如：姚氏 岳和 岳飞 王员外 黑风岭 汤阴县 片瓦无存"></textarea>
+            </label>
+            <div class="muted" style="font-size:11px; margin-top:2px;">
+              填了会改用支持热词偏置的 SeACo-Paraformer 重新识别（改了热词会重跑识别，不改则复用缓存）。
+              实测在评书素材上：「岳河→岳和」「片着瓦无存→片瓦无存」被纠正，但同一次里「王员外」被带成了
+              「王外外」—— 热词会偏置整个解码，切完抽查专名附近那几段。
+            </div>
           </div>
           <!-- s1/s2 目录设置：可留空自动创建，也可自定义路径后直接放文件 -->
           <template v-if="dataSource === 's1' || dataSource === 's2'">
