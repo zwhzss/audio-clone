@@ -30,6 +30,10 @@ session.jsonl
 backend/_align_check.py
 backend/_exact_align.py
 
+# 一次性调试产物（手工落出的 job 回执与旧备份清单，代码里无人引用）
+backend/gen.json
+backend/backup_cleanup_*.json
+
 # 系统
 Thumbs.db
 .DS_Store
