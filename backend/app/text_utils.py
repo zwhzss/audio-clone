@@ -164,16 +164,23 @@ def _hard_split(sentence: str, max_chars: int) -> list[str]:
 
 
 def chunk_text(text: str, max_chars: int = 300) -> list[str]:
-    """把长文本切成适合 TTS 的小段：一句一片，引号内的 。！？ 不断开。
+    """切片优先按**自然段**：一段（<= max_chars）就是一片，和文字版评书的分段一致。
 
-    单句超过 max_chars 时按 _hard_split 安全切分。每片正好对应引擎里的一次合成
-    调用，因此「删掉某片」=「跳过某句」，语义清晰。
+    以前是一段一句一片，把 `一声令下，众喽啰蜂拥而上。周铁山回头一挥手：“护住镖车！”
+    镖局众人“哗啦”一声…` 拆成三片，每片各自合成，语气和节奏在句间被切断。
+
+    段落超过 max_chars 时退回按句子拆（引号内的 。！？ 不断句），
+    单句再超限则用 _hard_split 只在引号外的逗号下刀。
     """
     text = normalize_text(text)
     if not text:
         return []
     chunks: list[str] = []
     for para in [p.strip() for p in text.split("\n") if p.strip()]:
+        if len(para) <= max_chars:
+            if _WORD.search(para):
+                chunks.append(para)
+            continue
         for s in split_sentences(para):
             chunks.extend(_hard_split(s, max_chars))
     return [c for c in chunks if c and _WORD.search(c)]

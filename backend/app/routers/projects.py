@@ -327,9 +327,17 @@ def generate(project_id: str, resume: bool = False, db: Session = Depends(get_db
             p2.voice_track_path = voice_track
             p2.error = ""
             p2.chapters = auto_chapters(segments)
+            # 声音轨已经变了，旧成品就是过期产物。不作废的话，⑤ 区会继续播放/下载
+            # 改文字之前的那一份，用户读到的就是"改了字却不生效"。
+            stale_final = bool(p2.final_path)
+            if stale_final:
+                p2.final_path = ""
+                p2.duration = 0.0
             d2.commit()
-            update(100, f"声音轨就绪（{total} 段，云费用 ¥{p2.cost:.4f}）")
-            return {"segments": total, "voice_track": voice_track, "cost": p2.cost}
+            update(100, f"声音轨就绪（{total} 段，云费用 ¥{p2.cost:.4f}）"
+                        + ("；旧成品已作废，请重新渲染" if stale_final else ""))
+            return {"segments": total, "voice_track": voice_track, "cost": p2.cost,
+                    "final_invalidated": stale_final}
         finally:
             d2.close()
 

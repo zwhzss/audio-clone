@@ -307,7 +307,11 @@ async function generate(resume = false) {
       genJob.value = { id: r.job_id, progress: j.progress, message: j.message, status: j.status }
       if (j.status === 'success') {
         genBusy.value = false
-        toast('声音轨生成完成，可开始试听与微调')
+        if (j.result?.final_invalidated) {
+          toast('声音轨已更新，旧成品已作废 —— ⑤ 区请重新渲染最终作品', 'error')
+        } else {
+          toast('声音轨生成完成，可开始试听与微调')
+        }
         await loadDetail(projectId.value)
         await refreshAll()
       } else if (j.status === 'error') {

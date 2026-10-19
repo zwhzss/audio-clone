@@ -73,14 +73,8 @@ check("空文本", "   \n\n  ")
 check("诗歌分行", "床前明月光，\n疑是地上霜。\n举头望明月，\n低头思故乡。")
 check("多段落", "第一段结束。第二段开始。\n\n第二段第二句！第三段？第三段尾。")
 
-print("\n=== 期望的分片数（人工核对语义边界）")
-EXPECT = [
-    ("同段多句对话", 3),
-    ("引号内多句", 1),
-    ("半角引号", 3),
-    ("英文缩写", 2),
-    ("小数不切", 2),
-]
+print("\n=== 期望的分片数：chunk_text 按自然段，split_sentences 按句子")
+# chunk_text 现在一段（<=max_chars）就是一片；句子级由 split_sentences 负责
 SRC = {
     "同段多句对话": "他喊了一声：“站住！什么人？”赵猛一抱拳：“讨碗酒喝。”那人冷笑：“去吧。”",
     "引号内多句": "赵猛微微一笑：“朋友，别动手。我走南闯北，讲究一个‘理’字。要是非要动手——”（此处一拍醒木）“那就别怪我铁掌无情！”",
@@ -88,13 +82,41 @@ SRC = {
     "英文缩写": "I don't know. He said it's fine, and walked away.",
     "小数不切": "模型 v2.5 很好用。这次跑出了 3.5 分的成绩。",
 }
-for name, exp in EXPECT:
-    got_list = chunk_text(SRC[name])
-    got = len(got_list)
-    print("   %-8s 期望 %d 片，实得 %d 片  %s  %s" % (
-        name, exp, got, "OK" if got == exp else "*** 不符 ***", [c[:26] for c in got_list]))
-    if got != exp:
+CHUNK_EXPECT = {  # 单段 -> 1 片
+    "同段多句对话": 1, "引号内多句": 1, "半角引号": 1, "英文缩写": 1, "小数不切": 1,
+}
+SENT_EXPECT = {   # 句子级口径不变
+    "同段多句对话": 3, "引号内多句": 1, "半角引号": 3, "英文缩写": 2, "小数不切": 2,
+}
+for name in SRC:
+    nc = len(chunk_text(SRC[name]))
+    ns = len(split_sentences(SRC[name]))
+    ok = nc == CHUNK_EXPECT[name] and ns == SENT_EXPECT[name]
+    print("   %-8s 分片 期望%d 实得%d | 分句 期望%d 实得%d  %s" % (
+        name, CHUNK_EXPECT[name], nc, SENT_EXPECT[name], ns, "OK" if ok else "*** 不符 ***"))
+    if not ok:
         fails.append("片数:" + name)
+
+print("\n=== 自然段优先专项")
+PARA = "甲说完走了。\n\n乙接着说：“站住！什么人？”他也走了。\n\n丙道：“好吧。”"
+pc = chunk_text(PARA)
+print("   3 个自然段 -> %d 片 长度%s" % (len(pc), [len(x) for x in pc]))
+if len(pc) != 3:
+    fails.append("自然段数")
+if pc and "“站住！什么人？”" not in pc[1]:
+    fails.append("自然段内引号被打散")
+# 超长段必须退回按句拆，且不能劈开引号
+LONG = ("他说：“第一句话很长很长很长很长很长很长。”" * 8) + "旁人应了一声。"
+lc = chunk_text(LONG, 120)
+print("   超长段(%d字) mc=120 -> %d 片 长度%s 引号成对=%s" % (
+    len(LONG), len(lc), [len(x) for x in lc],
+    all(x.count("“") == x.count("”") for x in lc)))
+if len(lc) < 2:
+    fails.append("超长段未拆分")
+if not all(x.count("“") == x.count("”") for x in lc):
+    fails.append("超长段拆开后引号残缺")
+if re.sub(r"\s+", "", "".join(lc)) != re.sub(r"\s+", "", LONG):
+    fails.append("超长段有损")
 
 print("\n=== max_chars 敏感性（同一文稿）")
 for mc in (60, 120, 300):
