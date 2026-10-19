@@ -28,7 +28,7 @@ const dataPages = ref(1)
 const dataTotal = ref(0)
 const dataSource = ref('main') // main=主数据 / s1=语感数据 / s2=音色数据
 // 切分方式：silence=按静音（快）；align=先整条识别拿标点时间戳，只在句子边界下刀且自带标注
-const sliceOpts = reactive({ mode: 'silence', granularity: 'para', hotwords: '' })
+const sliceOpts = reactive({ mode: 'align', granularity: 'para', hotwords: '' })
 const dataSourceLabel = { main: '主数据', s1: '🗣 s1 语感数据', s2: '🎤 s2 音色数据' }
 
 onMounted(async () => {

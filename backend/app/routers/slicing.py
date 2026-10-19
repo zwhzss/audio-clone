@@ -119,7 +119,7 @@ class ProcessBody(BaseModel):
     max_piece: float | None = None
     merge_gap: float | None = None
     redo: bool = False          # True=清掉旧片段重新切；False=只在后面追加
-    mode: str = "silence"       # silence=按静音切 | align=识别对齐（句子/词绝不被劈开）
+    mode: str = "align"         # silence=按静音切 | align=识别对齐（句子/词绝不被劈开）
     granularity: str = "para"   # align 时：para=按段（若干完整句）| sentence=按句
     max_chars: int = 300        # align 段模式：一段最多多少字
     max_sec: float = 30.0       # align 段模式：一段最长多少秒
@@ -142,7 +142,7 @@ def process(task_id: str, body: ProcessBody, db: Session = Depends(get_db)):
         v = getattr(body, k)
         if v is not None:
             params[k] = v
-    params["mode"] = body.mode if body.mode in ("silence", "align") else "silence"
+    params["mode"] = body.mode if body.mode in ("silence", "align") else "align"
     if params["granularity"] not in ("para", "sentence"):
         raise HTTPException(400, "granularity 只能是 para（按段）或 sentence（按句）")
     if not 30 <= int(params["max_chars"]) <= 2000:

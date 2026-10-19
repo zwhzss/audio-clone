@@ -318,7 +318,7 @@ async def upload_training_audio(human_id: str, file: UploadFile, mode: str = For
 
 @router.post("/{human_id}/data-process")
 def process_training_data(human_id: str, mode: str = "replace", source: str = "main",
-                          slice_mode: str = "silence", granularity: str = "para",
+                          slice_mode: str = "align", granularity: str = "para",
                           max_chars: int = 300, max_sec: float = 30.0, hotwords: str = "",
                           db: Session = Depends(get_db)):
     """自动处理：逐个音频切片 → ASR 标注 → 生成可校对列表。
