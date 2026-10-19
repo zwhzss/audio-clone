@@ -1,0 +1,35 @@
+# 数据（本地存储，含音频/权重/数据库，18G 不入库）
+data/
+
+# 下载出来的 ASR 模型权重（funasr 用相对路径 tools/asr/models，曾在本目录落出 1.2GB）
+backend/tools/
+*.pt
+
+# Python
+__pycache__/
+*.pyc
+backend/.venv/
+.venv/
+backend/.env
+
+# Node
+node_modules/
+frontend/dist/
+
+# 日志与会话记录（体积大且可能含密钥）
+*.log
+session.jsonl
+.reasonix
+
+# 模型服务商笔记：doubao.txt 里有 1 行形似 API key，先不入库
+/qwen.txt
+/doubao.txt
+/deepseek.txt
+
+# 临时/调试脚本
+backend/_align_check.py
+backend/_exact_align.py
+
+# 系统
+Thumbs.db
+.DS_Store

@@ -1,0 +1,24 @@
+# 核心服务
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+
+# 数据库
+SQLAlchemy>=2.0.30
+
+# HTTP 客户端（调用云 API / GPT-SoVITS）
+httpx>=0.27
+
+# 音频处理（内置静态 ffmpeg 二进制，自动下载，无需系统安装）
+imageio-ffmpeg>=0.5.1
+numpy>=1.26
+
+# 文件上传
+python-multipart>=0.0.9
+
+# 免费 TTS 引擎（Microsoft Edge，无需密钥，用于生成初版音频）
+edge-tts>=6.1.10
+
+# 环境变量
+python-dotenv>=1.0

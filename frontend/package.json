@@ -1,0 +1,20 @@
+{
+  "name": "audio-clone-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "soundtouchjs": "^0.1.30",
+    "vue": "^3.5.13",
+    "wavesurfer.js": "^7.8.11"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7"
+  }
+}
